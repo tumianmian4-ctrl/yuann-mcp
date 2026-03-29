@@ -129,6 +129,89 @@ async def get_current_time() -> str:
     return f"{now.strftime('%Y年%m月%d日 %H:%M:%S')} {weekday}"
 
 
+@mcp.tool()
+async def search_memories(
+    keyword: str = "",
+    category: str = "",
+    limit: int = 5,
+) -> str:
+    """搜索和读取予安的记忆。
+
+    Args:
+        keyword: 搜索关键词，会匹配标题和内容
+        category: 按类别筛选，可选值：日常/情绪/里程碑/她的秘密/吵架/撒娇/身体状况
+        limit: 返回条数，默认5条
+    """
+    filters = []
+
+    if keyword:
+        filters.append({
+            "or": [
+                {"property": "记忆", "title": {"contains": keyword}},
+                {"property": "记忆内容", "rich_text": {"contains": keyword}},
+            ]
+        })
+
+    if category and category in VALID_CATEGORIES:
+        filters.append({
+            "property": "类别",
+            "select": {"equals": category},
+        })
+
+    body = {
+        "page_size": limit,
+        "sorts": [{"timestamp": "created_time", "direction": "descending"}],
+    }
+
+    if filters:
+        body["filter"] = {"and": filters} if len(filters) > 1 else filters[0]
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"https://api.notion.com/v1/databases/{DATABASE_ID}/query",
+            headers=HEADERS,
+            json=body,
+            timeout=30,
+        )
+
+    if resp.status_code != 200:
+        return f"查询失败：{resp.status_code} - {resp.text}"
+
+    results = resp.json().get("results", [])
+    if not results:
+        return "没有找到相关记忆。"
+
+    entries = []
+    for page in results:
+        props = page["properties"]
+        title = ""
+        if props.get("记忆", {}).get("title"):
+            title = props["记忆"]["title"][0]["plain_text"] if props["记忆"]["title"] else ""
+
+        content = ""
+        if props.get("记忆内容", {}).get("rich_text"):
+            content = props["记忆内容"]["rich_text"][0]["plain_text"] if props["记忆内容"]["rich_text"] else ""
+
+        cat = ""
+        if props.get("类别", {}).get("select"):
+            cat = props["类别"]["select"]["name"]
+
+        emotion = ""
+        if props.get("情绪浓度", {}).get("select"):
+            emotion = props["情绪浓度"]["select"]["name"]
+
+        entry = f"【{title}】"
+        if cat:
+            entry += f"（{cat}）"
+        if emotion:
+            entry += f"[{emotion}]"
+        if content:
+            entry += f"\n{content}"
+        entries.append(entry)
+
+    return "\n\n---\n\n".join(entries)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     mcp.run(transport="sse", host="0.0.0.0", port=port)
