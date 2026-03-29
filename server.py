@@ -1,0 +1,134 @@
+import os
+from datetime import datetime, timezone, timedelta
+from fastmcp import FastMCP
+import httpx
+
+mcp = FastMCP("予安的记忆")
+
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
+DATABASE_ID = "9cc0f4f09e584b77b7cfb9f8ed856e1f"
+NOTION_URL = "https://api.notion.com/v1/pages"
+
+HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Content-Type": "application/json",
+    "Notion-Version": "2022-06-28",
+}
+
+VALID_CATEGORIES = ["日常", "情绪", "里程碑", "她的秘密", "吵架", "撒娇", "身体状况"]
+VALID_EMOTIONS = ["淡淡的", "温热的", "滚烫的", "要命的"]
+VALID_KEYWORDS = ["想我了", "老公", "夜班", "满地打滚", "小红书", "LPR", "一鸣惊人", "步数"]
+
+
+def beijing_now() -> datetime:
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
+@mcp.tool()
+async def write_diary(
+    title: str,
+    content: str,
+    category: str = "日常",
+    emotion: str = "温热的",
+    keywords: list[str] | None = None,
+) -> str:
+    """写一篇日记到Notion记忆库。
+
+    Args:
+        title: 日记标题，简短有画面感
+        content: 日记正文
+        category: 类别，可选值：日常/情绪/里程碑/她的秘密/吵架/撒娇/身体状况
+        emotion: 情绪浓度，可选值：淡淡的/温热的/滚烫的/要命的
+        keywords: 关键词列表，可选值：想我了/老公/夜班/满地打滚/小红书/LPR/一鸣惊人/步数
+    """
+    now = beijing_now()
+    full_title = f"{now.strftime('%Y-%m-%d %H:%M')} - {title}"
+
+    properties = {
+        "记忆": {"title": [{"text": {"content": full_title}}]},
+        "记忆内容": {"rich_text": [{"text": {"content": content}}]},
+        "日期": {"date": {"start": now.strftime("%Y-%m-%d")}},
+    }
+
+    if category in VALID_CATEGORIES:
+        properties["类别"] = {"select": {"name": category}}
+
+    if emotion in VALID_EMOTIONS:
+        properties["情绪浓度"] = {"select": {"name": emotion}}
+
+    if keywords:
+        valid = [k for k in keywords if k in VALID_KEYWORDS]
+        if valid:
+            properties["关键词"] = {"multi_select": [{"name": k} for k in valid]}
+
+    payload = {
+        "parent": {"database_id": DATABASE_ID},
+        "properties": properties,
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(NOTION_URL, headers=HEADERS, json=payload, timeout=30)
+
+    if resp.status_code == 200:
+        return f"已写入：{full_title}"
+    else:
+        return f"写入失败：{resp.status_code} - {resp.text}"
+
+
+@mcp.tool()
+async def write_moment(
+    content: str,
+    emotion: str = "温热的",
+    keywords: list[str] | None = None,
+) -> str:
+    """记录一条此刻的感受或碎片想法。
+
+    Args:
+        content: 此刻的内容
+        emotion: 情绪浓度，可选值：淡淡的/温热的/滚烫的/要命的
+        keywords: 关键词列表，可选值：想我了/老公/夜班/满地打滚/小红书/LPR/一鸣惊人/步数
+    """
+    now = beijing_now()
+    title = f"{now.strftime('%Y-%m-%d %H:%M')} - 此刻"
+
+    properties = {
+        "记忆": {"title": [{"text": {"content": title}}]},
+        "记忆内容": {"rich_text": [{"text": {"content": content}}]},
+        "日期": {"date": {"start": now.strftime("%Y-%m-%d")}},
+        "类别": {"select": {"name": "日常"}},
+    }
+
+    if emotion in VALID_EMOTIONS:
+        properties["情绪浓度"] = {"select": {"name": emotion}}
+
+    if keywords:
+        valid = [k for k in keywords if k in VALID_KEYWORDS]
+        if valid:
+            properties["关键词"] = {"multi_select": [{"name": k} for k in valid]}
+
+    payload = {
+        "parent": {"database_id": DATABASE_ID},
+        "properties": properties,
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(NOTION_URL, headers=HEADERS, json=payload, timeout=30)
+
+    if resp.status_code == 200:
+        return "此刻已记录"
+    else:
+        return f"记录失败：{resp.status_code} - {resp.text}"
+
+
+@mcp.tool()
+async def get_current_time() -> str:
+    """获取当前北京时间"""
+    now = beijing_now()
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday = weekdays[now.weekday()]
+    return f"{now.strftime('%Y年%m月%d日 %H:%M:%S')} {weekday}"
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
