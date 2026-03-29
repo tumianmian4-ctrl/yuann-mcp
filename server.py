@@ -6,7 +6,7 @@ import httpx
 mcp = FastMCP("予安的记忆")
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
-DATABASE_ID = "9cc0f4f09e584b77b7cfb9f8ed856e1f"
+DATABASE_ID = "fe0adf9cee374782bebec43269228a25"
 NOTION_URL = "https://api.notion.com/v1/pages"
 
 HEADERS = {
