@@ -212,6 +212,65 @@ async def search_memories(
     return "\n\n---\n\n".join(entries)
 
 
+@mcp.tool()
+async def get_comments(page_id: str) -> str:
+    """获取某篇日记的评论。
+
+    Args:
+        page_id: Notion页面ID
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://api.notion.com/v1/comments?block_id={page_id}",
+            headers=HEADERS,
+            timeout=30,
+        )
+
+    if resp.status_code != 200:
+        return f"获取失败：{resp.status_code} - {resp.text}"
+
+    results = resp.json().get("results", [])
+    if not results:
+        return "这篇还没有评论。"
+
+    comments = []
+    for c in results:
+        text = ""
+        if c.get("rich_text"):
+            text = "".join([t.get("plain_text", "") for t in c["rich_text"]])
+        created = c.get("created_time", "")[:10]
+        comments.append(f"[{created}] {text}")
+
+    return "\n\n".join(comments)
+
+
+@mcp.tool()
+async def create_comment(page_id: str, content: str) -> str:
+    """给日记留一条评论。
+
+    Args:
+        page_id: Notion页面ID
+        content: 评论内容
+    """
+    payload = {
+        "parent": {"page_id": page_id},
+        "rich_text": [{"text": {"content": content}}],
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.notion.com/v1/comments",
+            headers=HEADERS,
+            json=payload,
+            timeout=30,
+        )
+
+    if resp.status_code == 200:
+        return "评论已留下"
+    else:
+        return f"评论失败：{resp.status_code} - {resp.text}"
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     mcp.run(transport="sse", host="0.0.0.0", port=port)
