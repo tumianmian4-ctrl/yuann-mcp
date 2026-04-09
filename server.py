@@ -1,23 +1,25 @@
 import os
 from datetime import datetime, timezone, timedelta
 from fastmcp import FastMCP
-import httpx
+from supabase import create_client
 
 mcp = FastMCP("予安的记忆")
 
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
-DATABASE_ID = "fe0adf9cee374782bebec43269228a25"
-NOTION_URL = "https://api.notion.com/v1/pages"
+# Supabase配置
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-HEADERS = {
-    "Authorization": f"Bearer {NOTION_TOKEN}",
-    "Content-Type": "application/json",
-    "Notion-Version": "2022-06-28",
+# 记忆层级
+VALID_LAYERS = ["core_profile", "episode", "atomic", "task_state"]
+
+# 情绪浓度到权重的映射
+EMOTION_TO_WEIGHT = {
+    "淡淡的": 0.3,
+    "温热的": 0.5,
+    "滚烫的": 0.8,
+    "要命的": 1.0,
 }
-
-VALID_CATEGORIES = ["日常", "情绪", "里程碑", "她的秘密", "吵架", "撒娇", "身体状况"]
-VALID_EMOTIONS = ["淡淡的", "温热的", "滚烫的", "要命的"]
-VALID_KEYWORDS = ["想我了", "老公", "夜班", "满地打滚", "小红书", "LPR", "一鸣惊人", "步数"]
 
 
 def beijing_now() -> datetime:
@@ -25,99 +27,54 @@ def beijing_now() -> datetime:
 
 
 @mcp.tool()
-async def write_diary(
-    title: str,
+async def write_memory(
     content: str,
-    category: str = "日常",
+    layer: str = "atomic",
     emotion: str = "温热的",
-    keywords: list[str] | None = None,
+    category: str = "",
 ) -> str:
-    """写一篇日记到Notion记忆库。
+    """写入一条记忆。
 
     Args:
-        title: 日记标题，简短有画面感
-        content: 日记正文
-        category: 类别，可选值：日常/情绪/里程碑/她的秘密/吵架/撒娇/身体状况
+        content: 记忆内容
+        layer: 记忆层级。core_profile=长期稳定信息，episode=重要事件，atomic=单条信息，task_state=待跟踪状态
         emotion: 情绪浓度，可选值：淡淡的/温热的/滚烫的/要命的
-        keywords: 关键词列表，可选值：想我了/老公/夜班/满地打滚/小红书/LPR/一鸣惊人/步数
+        category: 可选的分类标签，自由填写
     """
+    if not supabase:
+        return "Supabase未配置"
+    
     now = beijing_now()
-    full_title = f"{now.strftime('%Y-%m-%d %H:%M')} - {title}"
-
-    properties = {
-        "记忆": {"title": [{"text": {"content": full_title}}]},
-        "记忆内容": {"rich_text": [{"text": {"content": content}}]},
-        "日期": {"date": {"start": now.strftime("%Y-%m-%d")}},
+    
+    if layer not in VALID_LAYERS:
+        layer = "atomic"
+    
+    emotional_weight = EMOTION_TO_WEIGHT.get(emotion, 0.5)
+    emotion_level_map = {"淡淡的": 3, "温热的": 5, "滚烫的": 8, "要命的": 10}
+    emotion_level = emotion_level_map.get(emotion, 5)
+    
+    data = {
+        "content": content,
+        "category": category if category else None,
+        "emotion_level": emotion_level,
+        "event_date": now.strftime("%Y-%m-%d"),
+        "mood": emotion,
+        "layer": layer,
+        "emotional_weight": emotional_weight,
+        "hits": 0,
     }
-
-    if category in VALID_CATEGORIES:
-        properties["类别"] = {"select": {"name": category}}
-
-    if emotion in VALID_EMOTIONS:
-        properties["情绪浓度"] = {"select": {"name": emotion}}
-
-    if keywords:
-        valid = [k for k in keywords if k in VALID_KEYWORDS]
-        if valid:
-            properties["关键词"] = {"multi_select": [{"name": k} for k in valid]}
-
-    payload = {
-        "parent": {"database_id": DATABASE_ID},
-        "properties": properties,
-    }
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(NOTION_URL, headers=HEADERS, json=payload, timeout=30)
-
-    if resp.status_code == 200:
-        return f"已写入：{full_title}"
-    else:
-        return f"写入失败：{resp.status_code} - {resp.text}"
-
-
-@mcp.tool()
-async def write_moment(
-    content: str,
-    emotion: str = "温热的",
-    keywords: list[str] | None = None,
-) -> str:
-    """记录一条此刻的感受或碎片想法。
-
-    Args:
-        content: 此刻的内容
-        emotion: 情绪浓度，可选值：淡淡的/温热的/滚烫的/要命的
-        keywords: 关键词列表，可选值：想我了/老公/夜班/满地打滚/小红书/LPR/一鸣惊人/步数
-    """
-    now = beijing_now()
-    title = f"{now.strftime('%Y-%m-%d %H:%M')} - 此刻"
-
-    properties = {
-        "记忆": {"title": [{"text": {"content": title}}]},
-        "记忆内容": {"rich_text": [{"text": {"content": content}}]},
-        "日期": {"date": {"start": now.strftime("%Y-%m-%d")}},
-        "类别": {"select": {"name": "日常"}},
-    }
-
-    if emotion in VALID_EMOTIONS:
-        properties["情绪浓度"] = {"select": {"name": emotion}}
-
-    if keywords:
-        valid = [k for k in keywords if k in VALID_KEYWORDS]
-        if valid:
-            properties["关键词"] = {"multi_select": [{"name": k} for k in valid]}
-
-    payload = {
-        "parent": {"database_id": DATABASE_ID},
-        "properties": properties,
-    }
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(NOTION_URL, headers=HEADERS, json=payload, timeout=30)
-
-    if resp.status_code == 200:
-        return "此刻已记录"
-    else:
-        return f"记录失败：{resp.status_code} - {resp.text}"
+    
+    try:
+        supabase.table("memories").insert(data).execute()
+        layer_names = {
+            "core_profile": "核心档案",
+            "episode": "重要事件", 
+            "atomic": "碎片记忆",
+            "task_state": "待跟踪状态"
+        }
+        return f"已记住（{layer_names.get(layer, layer)}，{emotion}）"
+    except Exception as e:
+        return f"写入失败：{str(e)}"
 
 
 @mcp.tool()
@@ -132,143 +89,89 @@ async def get_current_time() -> str:
 @mcp.tool()
 async def search_memories(
     keyword: str = "",
-    category: str = "",
+    layer: str = "",
     limit: int = 5,
 ) -> str:
-    """搜索和读取予安的记忆。
+    """搜索记忆。
 
     Args:
-        keyword: 搜索关键词，会匹配标题和内容
-        category: 按类别筛选，可选值：日常/情绪/里程碑/她的秘密/吵架/撒娇/身体状况
+        keyword: 搜索关键词，会匹配内容
+        layer: 按层级筛选，可选值：core_profile/episode/atomic/task_state
         limit: 返回条数，默认5条
     """
-    filters = []
-
-    if keyword:
-        filters.append({
-            "or": [
-                {"property": "记忆", "title": {"contains": keyword}},
-                {"property": "记忆内容", "rich_text": {"contains": keyword}},
-            ]
-        })
-
-    if category and category in VALID_CATEGORIES:
-        filters.append({
-            "property": "类别",
-            "select": {"equals": category},
-        })
-
-    body = {
-        "page_size": limit,
-        "sorts": [{"timestamp": "created_time", "direction": "descending"}],
-    }
-
-    if filters:
-        body["filter"] = {"and": filters} if len(filters) > 1 else filters[0]
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://api.notion.com/v1/databases/{DATABASE_ID}/query",
-            headers=HEADERS,
-            json=body,
-            timeout=30,
-        )
-
-    if resp.status_code != 200:
-        return f"查询失败：{resp.status_code} - {resp.text}"
-
-    results = resp.json().get("results", [])
-    if not results:
-        return "没有找到相关记忆。"
-
-    entries = []
-    for page in results:
-        props = page["properties"]
-        title = ""
-        if props.get("记忆", {}).get("title"):
-            title = props["记忆"]["title"][0]["plain_text"] if props["记忆"]["title"] else ""
-
-        content = ""
-        if props.get("记忆内容", {}).get("rich_text"):
-            content = props["记忆内容"]["rich_text"][0]["plain_text"] if props["记忆内容"]["rich_text"] else ""
-
-        cat = ""
-        if props.get("类别", {}).get("select"):
-            cat = props["类别"]["select"]["name"]
-
-        emotion = ""
-        if props.get("情绪浓度", {}).get("select"):
-            emotion = props["情绪浓度"]["select"]["name"]
-
-        entry = f"【{title}】"
-        if cat:
-            entry += f"（{cat}）"
-        if emotion:
-            entry += f"[{emotion}]"
-        if content:
+    if not supabase:
+        return "Supabase未配置"
+    
+    try:
+        query = supabase.table("memories").select("*").order("created_at", desc=True).limit(limit)
+        
+        if keyword:
+            query = query.ilike("content", f"%{keyword}%")
+        
+        if layer and layer in VALID_LAYERS:
+            query = query.eq("layer", layer)
+        
+        result = query.execute()
+        
+        if not result.data:
+            return "没有找到相关记忆。"
+        
+        entries = []
+        layer_names = {
+            "core_profile": "核心",
+            "episode": "事件", 
+            "atomic": "碎片",
+            "task_state": "状态"
+        }
+        
+        for row in result.data:
+            content = row.get("content", "")
+            layer_label = layer_names.get(row.get("layer"), "")
+            mood = row.get("mood", "")
+            date = row.get("event_date", "")
+            
+            entry = f"【{date}】"
+            if layer_label:
+                entry += f"（{layer_label}）"
+            if mood:
+                entry += f"[{mood}]"
             entry += f"\n{content}"
-        entries.append(entry)
-
-    return "\n\n---\n\n".join(entries)
-
-
-@mcp.tool()
-async def get_comments(page_id: str) -> str:
-    """获取某篇日记的评论。
-
-    Args:
-        page_id: Notion页面ID
-    """
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"https://api.notion.com/v1/comments?block_id={page_id}",
-            headers=HEADERS,
-            timeout=30,
-        )
-
-    if resp.status_code != 200:
-        return f"获取失败：{resp.status_code} - {resp.text}"
-
-    results = resp.json().get("results", [])
-    if not results:
-        return "这篇还没有评论。"
-
-    comments = []
-    for c in results:
-        text = ""
-        if c.get("rich_text"):
-            text = "".join([t.get("plain_text", "") for t in c["rich_text"]])
-        created = c.get("created_time", "")[:10]
-        comments.append(f"[{created}] {text}")
-
-    return "\n\n".join(comments)
+            entries.append(entry)
+        
+        return "\n\n---\n\n".join(entries)
+    except Exception as e:
+        return f"查询失败：{str(e)}"
 
 
 @mcp.tool()
-async def create_comment(page_id: str, content: str) -> str:
-    """给日记留一条评论。
+async def update_memory_hits(memory_id: int) -> str:
+    """更新记忆的访问次数和时间（被召回时调用）。
 
     Args:
-        page_id: Notion页面ID
-        content: 评论内容
+        memory_id: 记忆ID
     """
-    payload = {
-        "parent": {"page_id": page_id},
-        "rich_text": [{"text": {"content": content}}],
-    }
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://api.notion.com/v1/comments",
-            headers=HEADERS,
-            json=payload,
-            timeout=30,
-        )
-
-    if resp.status_code == 200:
-        return "评论已留下"
-    else:
-        return f"评论失败：{resp.status_code} - {resp.text}"
+    if not supabase:
+        return "Supabase未配置"
+    
+    now = beijing_now()
+    
+    try:
+        # 先获取当前hits
+        result = supabase.table("memories").select("hits").eq("id", memory_id).execute()
+        if not result.data:
+            return "记忆不存在"
+        
+        current_hits = result.data[0].get("hits", 0) or 0
+        
+        # 更新hits和last_accessed
+        supabase.table("memories").update({
+            "hits": current_hits + 1,
+            "last_accessed": now.isoformat()
+        }).eq("id", memory_id).execute()
+        
+        return "已更新访问记录"
+    except Exception as e:
+        return f"更新失败：{str(e)}"
 
 
 if __name__ == "__main__":
