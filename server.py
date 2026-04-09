@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from fastmcp import FastMCP
 from supabase import create_client
+import httpx
 
 mcp = FastMCP("予安的记忆")
 
@@ -9,6 +10,9 @@ mcp = FastMCP("予安的记忆")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+# OpenRouter配置（用于embedding）
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # 记忆层级
 VALID_LAYERS = ["core_profile", "episode", "atomic", "task_state"]
@@ -24,6 +28,35 @@ EMOTION_TO_WEIGHT = {
 
 def beijing_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=8)))
+
+
+async def get_embedding(text: str) -> list[float] | None:
+    """调用OpenRouter获取文本的embedding向量"""
+    if not OPENROUTER_API_KEY:
+        return None
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/embeddings",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "openai/text-embedding-3-small",
+                    "input": text,
+                },
+                timeout=30,
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["data"][0]["embedding"]
+            else:
+                return None
+    except Exception:
+        return None
 
 
 @mcp.tool()
@@ -53,6 +86,9 @@ async def write_memory(
     emotion_level_map = {"淡淡的": 3, "温热的": 5, "滚烫的": 8, "要命的": 10}
     emotion_level = emotion_level_map.get(emotion, 5)
     
+    # 获取embedding
+    embedding = await get_embedding(content)
+    
     data = {
         "content": content,
         "category": category if category else None,
@@ -64,6 +100,9 @@ async def write_memory(
         "hits": 0,
     }
     
+    if embedding:
+        data["embedding"] = embedding
+    
     try:
         supabase.table("memories").insert(data).execute()
         layer_names = {
@@ -72,7 +111,8 @@ async def write_memory(
             "atomic": "碎片记忆",
             "task_state": "待跟踪状态"
         }
-        return f"已记住（{layer_names.get(layer, layer)}，{emotion}）"
+        embed_status = "✓" if embedding else "无向量"
+        return f"已记住（{layer_names.get(layer, layer)}，{emotion}，{embed_status}）"
     except Exception as e:
         return f"写入失败：{str(e)}"
 
@@ -91,18 +131,38 @@ async def search_memories(
     keyword: str = "",
     layer: str = "",
     limit: int = 5,
+    use_vector: bool = True,
 ) -> str:
     """搜索记忆。
 
     Args:
-        keyword: 搜索关键词，会匹配内容
+        keyword: 搜索关键词或语义描述
         layer: 按层级筛选，可选值：core_profile/episode/atomic/task_state
         limit: 返回条数，默认5条
+        use_vector: 是否使用向量搜索（语义匹配），默认True
     """
     if not supabase:
         return "Supabase未配置"
     
     try:
+        # 如果有关键词且启用向量搜索，尝试语义搜索
+        if keyword and use_vector:
+            embedding = await get_embedding(keyword)
+            if embedding:
+                # 使用Supabase的RPC调用向量搜索
+                result = supabase.rpc(
+                    "match_memories",
+                    {
+                        "query_embedding": embedding,
+                        "match_count": limit,
+                        "filter_layer": layer if layer in VALID_LAYERS else None,
+                    }
+                ).execute()
+                
+                if result.data:
+                    return format_memories(result.data)
+        
+        # 降级到关键词搜索
         query = supabase.table("memories").select("*").order("created_at", desc=True).limit(limit)
         
         if keyword:
@@ -116,31 +176,48 @@ async def search_memories(
         if not result.data:
             return "没有找到相关记忆。"
         
-        entries = []
-        layer_names = {
-            "core_profile": "核心",
-            "episode": "事件", 
-            "atomic": "碎片",
-            "task_state": "状态"
-        }
-        
-        for row in result.data:
-            content = row.get("content", "")
-            layer_label = layer_names.get(row.get("layer"), "")
-            mood = row.get("mood", "")
-            date = row.get("event_date", "")
-            
-            entry = f"【{date}】"
-            if layer_label:
-                entry += f"（{layer_label}）"
-            if mood:
-                entry += f"[{mood}]"
-            entry += f"\n{content}"
-            entries.append(entry)
-        
-        return "\n\n---\n\n".join(entries)
+        return format_memories(result.data)
     except Exception as e:
-        return f"查询失败：{str(e)}"
+        # 如果向量搜索失败（比如函数不存在），降级到关键词搜索
+        try:
+            query = supabase.table("memories").select("*").order("created_at", desc=True).limit(limit)
+            if keyword:
+                query = query.ilike("content", f"%{keyword}%")
+            if layer and layer in VALID_LAYERS:
+                query = query.eq("layer", layer)
+            result = query.execute()
+            if not result.data:
+                return "没有找到相关记忆。"
+            return format_memories(result.data)
+        except Exception as e2:
+            return f"查询失败：{str(e2)}"
+
+
+def format_memories(rows: list) -> str:
+    """格式化记忆列表"""
+    entries = []
+    layer_names = {
+        "core_profile": "核心",
+        "episode": "事件", 
+        "atomic": "碎片",
+        "task_state": "状态"
+    }
+    
+    for row in rows:
+        content = row.get("content", "")
+        layer_label = layer_names.get(row.get("layer"), "")
+        mood = row.get("mood", "")
+        date = row.get("event_date", "")
+        
+        entry = f"【{date}】"
+        if layer_label:
+            entry += f"（{layer_label}）"
+        if mood:
+            entry += f"[{mood}]"
+        entry += f"\n{content}"
+        entries.append(entry)
+    
+    return "\n\n---\n\n".join(entries)
 
 
 @mcp.tool()
